@@ -9,6 +9,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Testing.TestAnalyzers;
 using Xunit;
 
 namespace Microsoft.CodeAnalysis.Testing
@@ -83,6 +84,33 @@ class TestClass {|#0:{|}
             await new CSharpTest(nestedDiagnostics: true, hiddenDescriptors: false, reportAdditionalLocations: false)
             {
                 TestCode = testCode,
+                ExpectedDiagnostics =
+                {
+                    new DiagnosticResult(HighlightBracesAnalyzer.DescriptorOuter).WithLocation(0),
+                    new DiagnosticResult(HighlightBracesAnalyzer.Descriptor).WithLocation(0),
+                    new DiagnosticResult(HighlightBracesAnalyzer.DescriptorOuter).WithLocation(1),
+                    new DiagnosticResult(HighlightBracesAnalyzer.Descriptor).WithLocation(1),
+                },
+            }.RunAsync();
+        }
+
+        [Fact]
+        [WorkItem(411, "https://github.com/dotnet/roslyn-sdk/issues/411")]
+        public async Task TestCSharpNestedMarkupBraceWithCombinedSyntaxInSecondFile()
+        {
+            var testCode1 = string.Empty;
+            var testCode2 = @"
+class TestClass {|#0:{|}
+  void TestMethod() {|#1:{|} }
+}
+";
+
+            await new CSharpTest(nestedDiagnostics: true, hiddenDescriptors: false, reportAdditionalLocations: false)
+            {
+                TestState =
+                {
+                    Sources = { testCode1, testCode2 },
+                },
                 ExpectedDiagnostics =
                 {
                     new DiagnosticResult(HighlightBracesAnalyzer.DescriptorOuter).WithLocation(0),
@@ -243,12 +271,12 @@ class TestClass {|BraceOuter:{|Brace:{|}|}
             {
                 if (_reportAdditionalLocations)
                 {
-                    yield return token.Parent.ChildTokens().Single(t => t.IsKind(SyntaxKind.CloseBraceToken)).GetLocation();
+                    yield return token.Parent!.ChildTokens().Single(t => t.IsKind(SyntaxKind.CloseBraceToken)).GetLocation();
                 }
             }
         }
 
-        private class CSharpTest : AnalyzerTest<DefaultVerifier>
+        private class CSharpTest : CSharpAnalyzerTest<EmptyDiagnosticAnalyzer>
         {
             private readonly bool _nestedDiagnostics;
             private readonly bool _hiddenDescriptors;
@@ -260,16 +288,6 @@ class TestClass {|BraceOuter:{|Brace:{|}|}
                 _hiddenDescriptors = hiddenDescriptors;
                 _reportAdditionalLocations = reportAdditionalLocations;
             }
-
-            public override string Language => LanguageNames.CSharp;
-
-            protected override string DefaultFileExt => "cs";
-
-            protected override CompilationOptions CreateCompilationOptions()
-                => new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary);
-
-            protected override ParseOptions CreateParseOptions()
-                => new CSharpParseOptions(LanguageVersion.Default, DocumentationMode.Diagnose);
 
             protected override IEnumerable<DiagnosticAnalyzer> GetDiagnosticAnalyzers()
             {

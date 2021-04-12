@@ -15,6 +15,7 @@ using Microsoft.CodeAnalysis.CodeFixes;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Testing.TestFixes;
 using Microsoft.CodeAnalysis.Text;
 using Xunit;
 
@@ -90,10 +91,6 @@ class TestClass {{
 }}
 ";
 
-            // The batch code fix provider does not support nested code actions.
-            // https://github.com/dotnet/roslyn/issues/43044
-            var batchFixedCode = testCode;
-
             // Three CodeFixProviders provide three actions
             var codeFixes = ImmutableArray.Create(
                 ImmutableArray.Create(1),
@@ -103,11 +100,6 @@ class TestClass {{
             {
                 TestCode = testCode,
                 FixedCode = fixedCode,
-                BatchFixedState =
-                {
-                    Sources = { batchFixedCode },
-                    MarkupHandling = MarkupMode.Allow,
-                },
             }.RunAsync();
         }
 #endif
@@ -259,6 +251,63 @@ class TestClass {{
             Assert.Equal($"Context: Iterative code fix application{Environment.NewLine}The code action equivalence key and index must be consistent when both are specified.", exception.Message);
         }
 
+        [Fact]
+        public async Task TestAdditionalVerificationSuccess()
+        {
+            var testCode = @"
+class TestClass {
+  int field = [|0|];
+}
+";
+            var fixedCode = $@"
+class TestClass {{
+  int field = 2;
+}}
+";
+
+            // A single CodeFixProvider provides three actions
+            var codeFixes = ImmutableArray.Create(ImmutableArray.Create(1, 2, 3));
+            await new CSharpTest(codeFixes)
+            {
+                TestCode = testCode,
+                FixedCode = fixedCode,
+                CodeActionIndex = 1,
+                CodeActionEquivalenceKey = "ReplaceZeroFix_2",
+                CodeActionVerifier = (codeAction, verifier) => verifier.Equal("ThisToBase", codeAction.Title),
+            }.RunAsync();
+        }
+
+        [Fact]
+        public async Task TestAdditionalVerificationFailure()
+        {
+            var testCode = @"
+class TestClass {
+  int field = [|0|];
+}
+";
+            var fixedCode = $@"
+class TestClass {{
+  int field = 2;
+}}
+";
+
+            // A single CodeFixProvider provides three actions
+            var codeFixes = ImmutableArray.Create(ImmutableArray.Create(1, 2, 3));
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            {
+                await new CSharpTest(codeFixes)
+                {
+                    TestCode = testCode,
+                    FixedCode = fixedCode,
+                    CodeActionIndex = 1,
+                    CodeActionEquivalenceKey = "ReplaceZeroFix_2",
+                    CodeActionVerifier = (codeAction, verifier) => verifier.Equal("Expected title", codeAction.Title),
+                }.RunAsync();
+            });
+
+            Assert.Equal($"Context: Iterative code fix application{Environment.NewLine}items not equal.  expected:'Expected title' actual:'ThisToBase'", exception.Message);
+        }
+
         [DiagnosticAnalyzer(LanguageNames.CSharp)]
         private class LiteralZeroAnalyzer : DiagnosticAnalyzer
         {
@@ -338,7 +387,7 @@ class TestClass {{
 
             private async Task<Document> CreateChangedDocument(Document document, TextSpan sourceSpan, int replacement, CancellationToken cancellationToken)
             {
-                var tree = await document.GetSyntaxTreeAsync(cancellationToken);
+                var tree = (await document.GetSyntaxTreeAsync(cancellationToken))!;
                 var root = await tree.GetRootAsync(cancellationToken);
                 var token = root.FindToken(sourceSpan.Start);
                 var newToken = SyntaxFactory.Literal(token.LeadingTrivia, replacement.ToString(), replacement, token.TrailingTrivia);
@@ -346,7 +395,7 @@ class TestClass {{
             }
         }
 
-        private class CSharpTest : CodeFixTest<DefaultVerifier>
+        private class CSharpTest : CSharpCodeFixTest<LiteralZeroAnalyzer, EmptyCodeFixProvider>
         {
             private readonly ImmutableArray<ImmutableArray<int>> _replacementGroups;
             private readonly bool _nested;
@@ -357,33 +406,12 @@ class TestClass {{
                 _nested = nested;
             }
 
-            public override string Language => LanguageNames.CSharp;
-
-            public override Type SyntaxKindType => typeof(SyntaxKind);
-
-            protected override string DefaultFileExt => "cs";
-
-            protected override CompilationOptions CreateCompilationOptions()
-            {
-                return new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary);
-            }
-
-            protected override ParseOptions CreateParseOptions()
-            {
-                return new CSharpParseOptions(LanguageVersion.Default, DocumentationMode.Diagnose);
-            }
-
             protected override IEnumerable<CodeFixProvider> GetCodeFixProviders()
             {
                 foreach (var replacementGroup in _replacementGroups)
                 {
                     yield return new ReplaceZeroFix(replacementGroup, _nested);
                 }
-            }
-
-            protected override IEnumerable<DiagnosticAnalyzer> GetDiagnosticAnalyzers()
-            {
-                yield return new LiteralZeroAnalyzer();
             }
         }
     }

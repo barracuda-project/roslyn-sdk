@@ -14,6 +14,7 @@ using Microsoft.CodeAnalysis.CodeRefactorings;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.Simplification;
+using Microsoft.CodeAnalysis.Testing.Model;
 using Microsoft.CodeAnalysis.Text;
 
 namespace Microsoft.CodeAnalysis.Testing
@@ -51,7 +52,7 @@ namespace Microsoft.CodeAnalysis.Testing
 
         protected CodeRefactoringTest()
         {
-            FixedState = new SolutionState(DefaultFilePathPrefix, DefaultFileExt);
+            FixedState = new SolutionState(DefaultTestProjectName, Language, DefaultFilePathPrefix, DefaultFileExt);
         }
 
         protected override IEnumerable<DiagnosticAnalyzer> GetDiagnosticAnalyzers()
@@ -78,11 +79,11 @@ namespace Microsoft.CodeAnalysis.Testing
             var testState = rawTestState.WithProcessedMarkup(MarkupOptions, defaultDiagnostic, supportedDiagnostics, fixableDiagnostics, DefaultFilePath);
             var fixedState = rawFixedState.WithProcessedMarkup(MarkupOptions, defaultDiagnostic, supportedDiagnostics, fixableDiagnostics, DefaultFilePath);
 
-            await VerifyDiagnosticsAsync(testState.Sources.ToArray(), testState.AdditionalFiles.ToArray(), testState.AdditionalProjects.ToArray(), testState.AdditionalReferences.ToArray(), FilterTriggerSpanResults(testState.ExpectedDiagnostics).ToArray(), Verify.PushContext("Diagnostics of test state"), cancellationToken).ConfigureAwait(false);
+            await VerifyDiagnosticsAsync(new EvaluatedProjectState(testState, ReferenceAssemblies), testState.AdditionalProjects.Values.Select(additionalProject => new EvaluatedProjectState(additionalProject, ReferenceAssemblies)).ToImmutableArray(), FilterTriggerSpanResults(testState.ExpectedDiagnostics).ToArray(), Verify.PushContext("Diagnostics of test state"), cancellationToken).ConfigureAwait(false);
 
             if (CodeActionExpected())
             {
-                await VerifyDiagnosticsAsync(fixedState.Sources.ToArray(), fixedState.AdditionalFiles.ToArray(), fixedState.AdditionalProjects.ToArray(), fixedState.AdditionalReferences.ToArray(), FilterTriggerSpanResults(fixedState.ExpectedDiagnostics).ToArray(), Verify.PushContext("Diagnostics of fixed state"), cancellationToken).ConfigureAwait(false);
+                await VerifyDiagnosticsAsync(new EvaluatedProjectState(fixedState, ReferenceAssemblies), fixedState.AdditionalProjects.Values.Select(additionalProject => new EvaluatedProjectState(additionalProject, ReferenceAssemblies)).ToImmutableArray(), FilterTriggerSpanResults(fixedState.ExpectedDiagnostics).ToArray(), Verify.PushContext("Diagnostics of fixed state"), cancellationToken).ConfigureAwait(false);
                 await VerifyRefactoringAsync(testState, fixedState, GetTriggerSpanResult(testState.ExpectedDiagnostics), Verify, cancellationToken).ConfigureAwait(false);
             }
 
@@ -145,15 +146,15 @@ namespace Microsoft.CodeAnalysis.Testing
             SolutionState oldState,
             SolutionState newState,
             int numberOfIterations,
-            Func<DiagnosticResult, ImmutableArray<CodeRefactoringProvider>, int?, string?, Project, int, IVerifier, CancellationToken, Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)>> getFixedProject,
+            Func<DiagnosticResult, ImmutableArray<CodeRefactoringProvider>, int?, string?, Action<CodeAction, IVerifier>?, Project, int, IVerifier, CancellationToken, Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)>> getFixedProject,
             IVerifier verifier,
             CancellationToken cancellationToken)
         {
-            var project = await CreateProjectAsync(oldState.Sources.ToArray(), oldState.AdditionalFiles.ToArray(), oldState.AdditionalProjects.ToArray(), oldState.AdditionalReferences.ToArray(), language, cancellationToken);
+            var project = await CreateProjectAsync(new EvaluatedProjectState(oldState, ReferenceAssemblies), oldState.AdditionalProjects.Values.Select(additionalProject => new EvaluatedProjectState(additionalProject, ReferenceAssemblies)).ToImmutableArray(), cancellationToken);
             _ = await GetCompilerDiagnosticsAsync(project, cancellationToken).ConfigureAwait(false);
 
             ExceptionDispatchInfo? iterationCountFailure;
-            (project, iterationCountFailure) = await getFixedProject(triggerSpan, codeRefactoringProviders, CodeActionIndex, CodeActionEquivalenceKey, project, numberOfIterations, verifier, cancellationToken).ConfigureAwait(false);
+            (project, iterationCountFailure) = await getFixedProject(triggerSpan, codeRefactoringProviders, CodeActionIndex, CodeActionEquivalenceKey, CodeActionVerifier, project, numberOfIterations, verifier, cancellationToken).ConfigureAwait(false);
 
             // After applying the refactoring, compare the resulting string to the inputted one
             var updatedDocuments = project.Documents.ToArray();
@@ -164,7 +165,7 @@ namespace Microsoft.CodeAnalysis.Testing
             {
                 var actual = await GetSourceTextFromDocumentAsync(updatedDocuments[i], cancellationToken).ConfigureAwait(false);
                 verifier.EqualOrDiff(newState.Sources[i].content.ToString(), actual.ToString(), $"content of '{newState.Sources[i].filename}' did not match. Diff shown with expected as baseline:");
-                verifier.Equal(newState.Sources[i].content.Encoding, actual.Encoding, $"encoding of '{newState.Sources[i].filename}' was expected to be '{newState.Sources[i].content.Encoding}' but was '{actual.Encoding}'");
+                verifier.Equal(newState.Sources[i].content.Encoding, actual.Encoding, $"encoding of '{newState.Sources[i].filename}' was expected to be '{newState.Sources[i].content.Encoding?.WebName}' but was '{actual.Encoding?.WebName}'");
                 verifier.Equal(newState.Sources[i].content.ChecksumAlgorithm, actual.ChecksumAlgorithm, $"checksum algorithm of '{newState.Sources[i].filename}' was expected to be '{newState.Sources[i].content.ChecksumAlgorithm}' but was '{actual.ChecksumAlgorithm}'");
                 verifier.Equal(newState.Sources[i].filename, updatedDocuments[i].Name, $"file name was expected to be '{newState.Sources[i].filename}' but was '{updatedDocuments[i].Name}'");
             }
@@ -177,7 +178,7 @@ namespace Microsoft.CodeAnalysis.Testing
             {
                 var actual = await updatedAdditionalDocuments[i].GetTextAsync(cancellationToken).ConfigureAwait(false);
                 verifier.EqualOrDiff(newState.AdditionalFiles[i].content.ToString(), actual.ToString(), $"content of '{newState.AdditionalFiles[i].filename}' did not match. Diff shown with expected as baseline:");
-                verifier.Equal(newState.AdditionalFiles[i].content.Encoding, actual.Encoding, $"encoding of '{newState.AdditionalFiles[i].filename}' was expected to be '{newState.AdditionalFiles[i].content.Encoding}' but was '{actual.Encoding}'");
+                verifier.Equal(newState.AdditionalFiles[i].content.Encoding, actual.Encoding, $"encoding of '{newState.AdditionalFiles[i].filename}' was expected to be '{newState.AdditionalFiles[i].content.Encoding?.WebName}' but was '{actual.Encoding?.WebName}'");
                 verifier.Equal(newState.AdditionalFiles[i].content.ChecksumAlgorithm, actual.ChecksumAlgorithm, $"checksum algorithm of '{newState.AdditionalFiles[i].filename}' was expected to be '{newState.AdditionalFiles[i].content.ChecksumAlgorithm}' but was '{actual.ChecksumAlgorithm}'");
                 verifier.Equal(newState.AdditionalFiles[i].filename, updatedAdditionalDocuments[i].Name, $"file name was expected to be '{newState.AdditionalFiles[i].filename}' but was '{updatedAdditionalDocuments[i].Name}'");
             }
@@ -186,7 +187,7 @@ namespace Microsoft.CodeAnalysis.Testing
             iterationCountFailure?.Throw();
         }
 
-        private async Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> ApplyRefactoringAsync(DiagnosticResult triggerSpan, ImmutableArray<CodeRefactoringProvider> codeRefactoringProviders, int? codeActionIndex, string? codeActionEquivalenceKey, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
+        private async Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> ApplyRefactoringAsync(DiagnosticResult triggerSpan, ImmutableArray<CodeRefactoringProvider> codeRefactoringProviders, int? codeActionIndex, string? codeActionEquivalenceKey, Action<CodeAction, IVerifier>? codeActionVerifier, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
         {
             var expectedNumberOfIterations = numberOfIterations;
             if (numberOfIterations < 0)
@@ -218,7 +219,8 @@ namespace Microsoft.CodeAnalysis.Testing
                     await codeRefactoringProvider.ComputeRefactoringsAsync(context).ConfigureAwait(false);
                 }
 
-                var actionToApply = TryGetCodeActionToApply(actions.ToImmutable(), codeActionIndex, codeActionEquivalenceKey, verifier);
+                var filteredActions = FilterCodeActions(actions.ToImmutable());
+                var actionToApply = TryGetCodeActionToApply(filteredActions, codeActionIndex, codeActionEquivalenceKey, codeActionVerifier, verifier);
                 if (actionToApply != null)
                 {
                     anyActions = true;

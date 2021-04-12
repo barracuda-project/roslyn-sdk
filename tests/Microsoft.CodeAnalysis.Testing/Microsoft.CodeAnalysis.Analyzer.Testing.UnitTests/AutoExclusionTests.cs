@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Testing.TestAnalyzers;
 using Microsoft.CodeAnalysis.Text;
 using Xunit;
 
@@ -39,11 +40,11 @@ End Class
 ";
 
         [Fact]
-        public async Task TestCSharpAnalyzerWithoutExclusionFails()
+        public async Task TestCSharpAnalyzerWithUnspecifiedExclusionFails()
         {
             var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             {
-                await new CSharpReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags.Analyze | GeneratedCodeAnalysisFlags.ReportDiagnostics)
+                await new CSharpReplaceThisWithBaseTest(generatedCodeAnalysisFlags: null)
                 {
                     TestCode = ReplaceThisWithBaseTestCode,
                 }.RunAsync();
@@ -58,6 +59,15 @@ End Class
                 "VerifyCS.Diagnostic().WithSpan(4, 23, 4, 27)," + Environment.NewLine +
                 Environment.NewLine;
             new DefaultVerifier().EqualOrDiff(expected, exception.Message);
+        }
+
+        [Fact]
+        public async Task TestCSharpAnalyzerWithoutExclusionPasses()
+        {
+            await new CSharpReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags.Analyze | GeneratedCodeAnalysisFlags.ReportDiagnostics)
+            {
+                TestCode = ReplaceThisWithBaseTestCode,
+            }.RunAsync();
         }
 
         [Fact]
@@ -124,11 +134,11 @@ End Class
 
         [Fact]
         [WorkItem(159, "https://github.com/dotnet/roslyn-sdk/pull/159")]
-        public async Task TestVisualBasicAnalyzerWithoutExclusionFails()
+        public async Task TestVisualBasicAnalyzerWithUnspecifiedExclusionFails()
         {
             var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             {
-                await new VisualBasicReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags.Analyze | GeneratedCodeAnalysisFlags.ReportDiagnostics)
+                await new VisualBasicReplaceThisWithBaseTest(generatedCodeAnalysisFlags: null)
                 {
                     TestCode = ReplaceMyClassWithMyBaseTestCode,
                 }.RunAsync();
@@ -143,6 +153,16 @@ End Class
                 "VerifyVB.Diagnostic().WithSpan(5, 5, 5, 12)," + Environment.NewLine +
                 Environment.NewLine;
             new DefaultVerifier().EqualOrDiff(expected, exception.Message);
+        }
+
+        [Fact]
+        [WorkItem(159, "https://github.com/dotnet/roslyn-sdk/pull/159")]
+        public async Task TestVisualBasicAnalyzerWithoutExclusionPasses()
+        {
+            await new VisualBasicReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags.Analyze | GeneratedCodeAnalysisFlags.ReportDiagnostics)
+            {
+                TestCode = ReplaceMyClassWithMyBaseTestCode,
+            }.RunAsync();
         }
 
         [Fact]
@@ -206,9 +226,9 @@ End Class
             internal static readonly DiagnosticDescriptor Descriptor =
                 new DiagnosticDescriptor("ThisToBase", "title", "message", "category", DiagnosticSeverity.Warning, isEnabledByDefault: true);
 
-            private readonly GeneratedCodeAnalysisFlags _generatedCodeAnalysisFlags;
+            private readonly GeneratedCodeAnalysisFlags? _generatedCodeAnalysisFlags;
 
-            public ReplaceThisWithBaseAnalyzer(GeneratedCodeAnalysisFlags generatedCodeAnalysisFlags)
+            public ReplaceThisWithBaseAnalyzer(GeneratedCodeAnalysisFlags? generatedCodeAnalysisFlags)
             {
                 _generatedCodeAnalysisFlags = generatedCodeAnalysisFlags;
             }
@@ -218,7 +238,10 @@ End Class
             public override void Initialize(AnalysisContext context)
             {
                 context.EnableConcurrentExecution();
-                context.ConfigureGeneratedCodeAnalysis(_generatedCodeAnalysisFlags);
+                if (_generatedCodeAnalysisFlags.HasValue)
+                {
+                    context.ConfigureGeneratedCodeAnalysis(_generatedCodeAnalysisFlags.Value);
+                }
 
                 context.RegisterSyntaxNodeAction(HandleThisExpression, CSharp.SyntaxKind.ThisExpression);
                 context.RegisterSyntaxNodeAction(HandleMyClassExpression, VisualBasic.SyntaxKind.MyClassExpression);
@@ -291,27 +314,13 @@ End Class
             }
         }
 
-        private class CSharpReplaceThisWithBaseTest : AnalyzerTest<DefaultVerifier>
+        private class CSharpReplaceThisWithBaseTest : CSharpAnalyzerTest<EmptyDiagnosticAnalyzer>
         {
-            private readonly GeneratedCodeAnalysisFlags _generatedCodeAnalysisFlags;
+            private readonly GeneratedCodeAnalysisFlags? _generatedCodeAnalysisFlags;
 
-            public CSharpReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags generatedCodeAnalysisFlags)
+            public CSharpReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags? generatedCodeAnalysisFlags)
             {
                 _generatedCodeAnalysisFlags = generatedCodeAnalysisFlags;
-            }
-
-            public override string Language => LanguageNames.CSharp;
-
-            protected override string DefaultFileExt => "cs";
-
-            protected override CompilationOptions CreateCompilationOptions()
-            {
-                return new CSharp.CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary);
-            }
-
-            protected override ParseOptions CreateParseOptions()
-            {
-                return new CSharp.CSharpParseOptions(CSharp.LanguageVersion.Default, DocumentationMode.Diagnose);
             }
 
             protected override IEnumerable<DiagnosticAnalyzer> GetDiagnosticAnalyzers()
@@ -320,27 +329,13 @@ End Class
             }
         }
 
-        private class VisualBasicReplaceThisWithBaseTest : AnalyzerTest<DefaultVerifier>
+        private class VisualBasicReplaceThisWithBaseTest : VisualBasicAnalyzerTest<EmptyDiagnosticAnalyzer>
         {
-            private readonly GeneratedCodeAnalysisFlags _generatedCodeAnalysisFlags;
+            private readonly GeneratedCodeAnalysisFlags? _generatedCodeAnalysisFlags;
 
-            public VisualBasicReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags generatedCodeAnalysisFlags)
+            public VisualBasicReplaceThisWithBaseTest(GeneratedCodeAnalysisFlags? generatedCodeAnalysisFlags)
             {
                 _generatedCodeAnalysisFlags = generatedCodeAnalysisFlags;
-            }
-
-            public override string Language => LanguageNames.VisualBasic;
-
-            protected override string DefaultFileExt => "vb";
-
-            protected override CompilationOptions CreateCompilationOptions()
-            {
-                return new VisualBasic.VisualBasicCompilationOptions(OutputKind.DynamicallyLinkedLibrary);
-            }
-
-            protected override ParseOptions CreateParseOptions()
-            {
-                return new VisualBasic.VisualBasicParseOptions(VisualBasic.LanguageVersion.Default, DocumentationMode.Diagnose);
             }
 
             protected override IEnumerable<DiagnosticAnalyzer> GetDiagnosticAnalyzers()

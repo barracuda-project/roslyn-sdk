@@ -12,16 +12,7 @@ namespace Analyzer1
     [Generator]
     public class SettingsXmlGenerator : ISourceGenerator
     {
-        private const string SettingsFileString = @"
-namespace XmlSettings
-{
-    public partial class XmlSettings
-    {
-        
-    }
-}
-";
-        public void Execute(SourceGeneratorContext context)
+        public void Execute(GeneratorExecutionContext context)
         {
             // Using the context, get any additional files that end in .xmlsettings
             IEnumerable<AdditionalText> settingsFiles = context.AdditionalFiles.Where(at => at.Path.EndsWith(".xmlsettings"));
@@ -31,7 +22,7 @@ namespace XmlSettings
             }
         }
         
-        private void ProcessSettingsFile(AdditionalText xmlFile, SourceGeneratorContext context)
+        private void ProcessSettingsFile(AdditionalText xmlFile, GeneratorExecutionContext context)
         {
             // try and load the settings file
             XmlDocument xmlDoc = new XmlDocument();
@@ -101,7 +92,7 @@ public {settingType} {settingName}
             context.AddSource($"Settings_{name}", SourceText.From(sb.ToString(), Encoding.UTF8));
         }
      
-        public void Initialize(InitializationContext context)
+        public void Initialize(GeneratorInitializationContext context)
         {
         }
     }

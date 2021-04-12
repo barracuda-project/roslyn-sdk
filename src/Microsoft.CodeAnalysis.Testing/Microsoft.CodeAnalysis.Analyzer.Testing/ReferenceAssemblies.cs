@@ -71,7 +71,8 @@ namespace Microsoft.CodeAnalysis.Testing
             ImmutableArray<string> assemblies,
             ImmutableArray<string> facadeAssemblies,
             ImmutableDictionary<string, ImmutableArray<string>> languageSpecificAssemblies,
-            ImmutableArray<PackageIdentity> packages)
+            ImmutableArray<PackageIdentity> packages,
+            string? nugetConfigFilePath)
         {
             TargetFramework = targetFramework;
             AssemblyIdentityComparer = assemblyIdentityComparer;
@@ -81,6 +82,7 @@ namespace Microsoft.CodeAnalysis.Testing
             FacadeAssemblies = facadeAssemblies.IsDefault ? ImmutableArray<string>.Empty : facadeAssemblies;
             LanguageSpecificAssemblies = languageSpecificAssemblies;
             Packages = packages.IsDefault ? ImmutableArray<PackageIdentity>.Empty : packages;
+            NuGetConfigFilePath = nugetConfigFilePath;
         }
 
         public static ReferenceAssemblies Default
@@ -119,14 +121,16 @@ namespace Microsoft.CodeAnalysis.Testing
 
         public ImmutableArray<PackageIdentity> Packages { get; }
 
+        public string? NuGetConfigFilePath { get; }
+
         public ReferenceAssemblies WithAssemblyIdentityComparer(AssemblyIdentityComparer assemblyIdentityComparer)
-            => new ReferenceAssemblies(TargetFramework, assemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, FacadeAssemblies, LanguageSpecificAssemblies, Packages);
+            => new ReferenceAssemblies(TargetFramework, assemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, FacadeAssemblies, LanguageSpecificAssemblies, Packages, NuGetConfigFilePath);
 
         public ReferenceAssemblies WithAssemblies(ImmutableArray<string> assemblies)
-            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, assemblies, FacadeAssemblies, LanguageSpecificAssemblies, Packages);
+            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, assemblies, FacadeAssemblies, LanguageSpecificAssemblies, Packages, NuGetConfigFilePath);
 
         public ReferenceAssemblies WithFacadeAssemblies(ImmutableArray<string> facadeAssemblies)
-            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, facadeAssemblies, LanguageSpecificAssemblies, Packages);
+            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, facadeAssemblies, LanguageSpecificAssemblies, Packages, NuGetConfigFilePath);
 
         public ReferenceAssemblies AddAssemblies(ImmutableArray<string> assemblies)
             => WithAssemblies(Assemblies.AddRange(assemblies));
@@ -135,7 +139,7 @@ namespace Microsoft.CodeAnalysis.Testing
             => WithFacadeAssemblies(FacadeAssemblies.AddRange(facadeAssemblies));
 
         public ReferenceAssemblies WithLanguageSpecificAssemblies(ImmutableDictionary<string, ImmutableArray<string>> languageSpecificAssemblies)
-            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, FacadeAssemblies, languageSpecificAssemblies, Packages);
+            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, FacadeAssemblies, languageSpecificAssemblies, Packages, NuGetConfigFilePath);
 
         public ReferenceAssemblies WithLanguageSpecificAssemblies(string language, ImmutableArray<string> assemblies)
             => WithLanguageSpecificAssemblies(LanguageSpecificAssemblies.SetItem(language, assemblies));
@@ -151,10 +155,13 @@ namespace Microsoft.CodeAnalysis.Testing
         }
 
         public ReferenceAssemblies WithPackages(ImmutableArray<PackageIdentity> packages)
-            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, FacadeAssemblies, LanguageSpecificAssemblies, packages);
+            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, FacadeAssemblies, LanguageSpecificAssemblies, packages, NuGetConfigFilePath);
 
         public ReferenceAssemblies AddPackages(ImmutableArray<PackageIdentity> packages)
             => WithPackages(Packages.AddRange(packages));
+
+        public ReferenceAssemblies WithNuGetConfigFilePath(string nugetConfigFilePath)
+            => new ReferenceAssemblies(TargetFramework, AssemblyIdentityComparer, ReferenceAssemblyPackage, ReferenceAssemblyPath, Assemblies, FacadeAssemblies, LanguageSpecificAssemblies, Packages, nugetConfigFilePath);
 
         public async Task<ImmutableArray<MetadataReference>> ResolveAsync(string? language, CancellationToken cancellationToken)
         {
@@ -200,7 +207,7 @@ namespace Microsoft.CodeAnalysis.Testing
         /// <seealso href="https://martinbjorkstrom.com/posts/2018-09-19-revisiting-nuget-client-libraries"/>
         private async Task<ImmutableArray<MetadataReference>> ResolveCoreAsync(string language, CancellationToken cancellationToken)
         {
-            var settings = Settings.LoadDefaultSettings(root: null);
+            var settings = string.IsNullOrEmpty(NuGetConfigFilePath) ? Settings.LoadDefaultSettings(root: null) : Settings.LoadSpecificSettings(root: null, NuGetConfigFilePath);
             var sourceRepositoryProvider = new SourceRepositoryProvider(new PackageSourceProvider(settings), Repository.Provider.GetCoreV3());
             var targetFramework = NuGetFramework.ParseFolder(TargetFramework);
             var logger = NullLogger.Instance;
@@ -364,7 +371,9 @@ namespace Microsoft.CodeAnalysis.Testing
                         var nearestRefItems = refItems.Single(x => x.TargetFramework == nearestRef);
                         foreach (var item in nearestRefItems.Items)
                         {
-                            if (!string.Equals(Path.GetExtension(item), ".dll", StringComparison.OrdinalIgnoreCase))
+                            if (!string.Equals(Path.GetExtension(item), ".dll", StringComparison.OrdinalIgnoreCase)
+                                && !string.Equals(Path.GetExtension(item), ".exe", StringComparison.OrdinalIgnoreCase)
+                                && !string.Equals(Path.GetExtension(item), ".winmd", StringComparison.OrdinalIgnoreCase))
                             {
                                 continue;
                             }
@@ -377,7 +386,9 @@ namespace Microsoft.CodeAnalysis.Testing
                         var nearestLibItems = libItems.Single(x => x.TargetFramework == nearestLib);
                         foreach (var item in nearestLibItems.Items)
                         {
-                            if (!string.Equals(Path.GetExtension(item), ".dll", StringComparison.OrdinalIgnoreCase))
+                            if (!string.Equals(Path.GetExtension(item), ".dll", StringComparison.OrdinalIgnoreCase)
+                                && !string.Equals(Path.GetExtension(item), ".exe", StringComparison.OrdinalIgnoreCase)
+                                && !string.Equals(Path.GetExtension(item), ".winmd", StringComparison.OrdinalIgnoreCase))
                             {
                                 continue;
                             }
@@ -411,6 +422,14 @@ namespace Microsoft.CodeAnalysis.Testing
                     {
                         resolvedAssemblies.Add(Path.GetFullPath(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".dll")));
                     }
+                    else if (File.Exists(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".exe")))
+                    {
+                        resolvedAssemblies.Add(Path.GetFullPath(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".exe")));
+                    }
+                    else if (File.Exists(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".winmd")))
+                    {
+                        resolvedAssemblies.Add(Path.GetFullPath(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".winmd")));
+                    }
                 }
 
                 // Prefer assemblies from the reference assembly package to ones otherwise provided
@@ -429,7 +448,7 @@ namespace Microsoft.CodeAnalysis.Testing
                     var facadesPath = Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, "Facades");
                     if (Directory.Exists(facadesPath))
                     {
-                        foreach (var path in Directory.GetFiles(facadesPath, "*.dll"))
+                        foreach (var path in Directory.GetFiles(facadesPath, "*.dll").Concat(Directory.GetFiles(facadesPath, "*.exe")).Concat(Directory.GetFiles(facadesPath, "*.winmd")))
                         {
                             resolvedAssemblies.RemoveWhere(existingAssembly => Path.GetFileNameWithoutExtension(existingAssembly) == Path.GetFileNameWithoutExtension(path));
                             resolvedAssemblies.Add(Path.GetFullPath(path));
@@ -442,6 +461,16 @@ namespace Microsoft.CodeAnalysis.Testing
                         {
                             resolvedAssemblies.RemoveWhere(existingAssembly => Path.GetFileNameWithoutExtension(existingAssembly) == assembly);
                             resolvedAssemblies.Add(Path.GetFullPath(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".dll")));
+                        }
+                        else if (File.Exists(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".exe")))
+                        {
+                            resolvedAssemblies.RemoveWhere(existingAssembly => Path.GetFileNameWithoutExtension(existingAssembly) == assembly);
+                            resolvedAssemblies.Add(Path.GetFullPath(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".exe")));
+                        }
+                        else if (File.Exists(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".winmd")))
+                        {
+                            resolvedAssemblies.RemoveWhere(existingAssembly => Path.GetFileNameWithoutExtension(existingAssembly) == assembly);
+                            resolvedAssemblies.Add(Path.GetFullPath(Path.Combine(referenceAssemblyInstalledPath!, ReferenceAssemblyPath!, assembly + ".winmd")));
                         }
                     }
                 }
@@ -815,14 +844,28 @@ namespace Microsoft.CodeAnalysis.Testing
                         "Microsoft.NETCore.App.Ref",
                         "3.1.0"),
                     Path.Combine("ref", "netcoreapp3.1"));
+        }
 
-            public static ReferenceAssemblies NetCoreApp50 { get; }
-                = new ReferenceAssemblies(
-                    "netcoreapp5.0",
-                    new PackageIdentity(
-                        "Microsoft.NETCore.App.Ref",
-                        "5.0.0-preview.1.20120.5"),
-                    Path.Combine("ref", "netcoreapp5.0"));
+        public static class Net
+        {
+            private static readonly Lazy<ReferenceAssemblies> _lazyNet50 =
+                new Lazy<ReferenceAssemblies>(() =>
+                {
+                    if (!NuGetFramework.Parse("net5.0").IsPackageBased)
+                    {
+                        // The NuGet version provided at runtime does not recognize the 'net5.0' target framework
+                        throw new NotSupportedException("The 'net5.0' target framework is not supported by this version of NuGet.");
+                    }
+
+                    return new ReferenceAssemblies(
+                        "net5.0",
+                        new PackageIdentity(
+                            "Microsoft.NETCore.App.Ref",
+                            "5.0.0"),
+                        Path.Combine("ref", "net5.0"));
+                });
+
+            public static ReferenceAssemblies Net50 => _lazyNet50.Value;
         }
 
         public static class NetStandard
@@ -984,6 +1027,15 @@ namespace Microsoft.CodeAnalysis.Testing
                         "NETStandard.Library.Ref",
                         "2.1.0"),
                     Path.Combine("ref", "netstandard2.1"));
+        }
+
+        internal static class TestAccessor
+        {
+            public static bool IsPackageBased(string targetFramework)
+            {
+                var framework = NuGetFramework.ParseFolder(targetFramework);
+                return framework.IsPackageBased;
+            }
         }
     }
 }

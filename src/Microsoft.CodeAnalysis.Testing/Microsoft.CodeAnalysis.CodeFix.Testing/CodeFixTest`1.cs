@@ -16,6 +16,7 @@ using Microsoft.CodeAnalysis.CodeFixes;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.Simplification;
+using Microsoft.CodeAnalysis.Testing.Model;
 using Microsoft.CodeAnalysis.Text;
 
 namespace Microsoft.CodeAnalysis.Testing
@@ -105,7 +106,7 @@ namespace Microsoft.CodeAnalysis.Testing
         ///
         /// <note>
         /// <para>The default value for this property can be interpreted as "Iterative code fix operations are expected
-        /// to complete in at most one operation for each fixable diagnostic in the input source has been applied.
+        /// to complete after at most one operation for each fixable diagnostic in the input source has been applied.
         /// Completing in fewer iterations is acceptable."</para>
         /// </note>
         /// </remarks>
@@ -138,12 +139,23 @@ namespace Microsoft.CodeAnalysis.Testing
         /// </summary>
         /// <remarks>
         /// <para>See the <see cref="NumberOfIncrementalIterations"/> property for an overview of the behavior of this
-        /// property. If the number of Fix All in Document iterations is not specified, the value from
-        /// <see cref="NumberOfFixAllIterations"/> is used.</para>
+        /// property. If the number of Fix All in Document iterations is not specified, the value is automatically
+        /// selected according to the current test configuration:</para>
+        ///
+        /// <list type="bullet">
+        /// <item><description>If a value has been explicitly provided for <see cref="NumberOfFixAllIterations"/>, the value is used as-is.</description></item>
+        /// <item><description>If the expected Fix All output equals the input sources, the default value is treated as <c>0</c>.</description></item>
+        /// <item><description>Otherwise, the default value is treated as the negative of the number of distinct documents containing fixable diagnostics (typically <c>-1</c>).</description></item>
+        /// </list>
+        ///
+        /// <note>
+        /// <para>The default value for this property can be interpreted as "Fix All in Document operations are expected
+        /// to complete after at most one operation for each fixable document in the input source has been applied.
+        /// Completing in fewer iterations is acceptable."</para>
+        /// </note>
         /// </remarks>
         /// <seealso cref="NumberOfIncrementalIterations"/>
         /// <seealso cref="NumberOfFixAllIterations"/>
-        /// <seealso href="https://github.com/dotnet/roslyn-sdk/issues/147">#147: Figure out Fix All iteration counts by context</seealso>
         public int? NumberOfFixAllInDocumentIterations { get; set; }
 
         /// <summary>
@@ -176,8 +188,8 @@ namespace Microsoft.CodeAnalysis.Testing
 
         protected CodeFixTest()
         {
-            FixedState = new SolutionState(DefaultFilePathPrefix, DefaultFileExt);
-            BatchFixedState = new SolutionState(DefaultFilePathPrefix, DefaultFileExt);
+            FixedState = new SolutionState(DefaultTestProjectName, Language, DefaultFilePathPrefix, DefaultFileExt);
+            BatchFixedState = new SolutionState(DefaultTestProjectName, Language, DefaultFilePathPrefix, DefaultFileExt);
         }
 
         /// <summary>
@@ -223,14 +235,14 @@ namespace Microsoft.CodeAnalysis.Testing
 
             var allowFixAll = (CodeFixTestBehaviors & CodeFixTestBehaviors.SkipFixAllCheck) != CodeFixTestBehaviors.SkipFixAllCheck;
 
-            await VerifyDiagnosticsAsync(testState.Sources.ToArray(), testState.AdditionalFiles.ToArray(), testState.AdditionalProjects.ToArray(), testState.AdditionalReferences.ToArray(), testState.ExpectedDiagnostics.ToArray(), Verify.PushContext("Diagnostics of test state"), cancellationToken).ConfigureAwait(false);
+            await VerifyDiagnosticsAsync(new EvaluatedProjectState(testState, ReferenceAssemblies), testState.AdditionalProjects.Values.Select(additionalProject => new EvaluatedProjectState(additionalProject, ReferenceAssemblies)).ToImmutableArray(), testState.ExpectedDiagnostics.ToArray(), Verify.PushContext("Diagnostics of test state"), cancellationToken).ConfigureAwait(false);
 
             if (CodeFixExpected())
             {
-                await VerifyDiagnosticsAsync(fixedState.Sources.ToArray(), fixedState.AdditionalFiles.ToArray(), fixedState.AdditionalProjects.ToArray(), fixedState.AdditionalReferences.ToArray(), fixedState.ExpectedDiagnostics.ToArray(), Verify.PushContext("Diagnostics of fixed state"), cancellationToken).ConfigureAwait(false);
+                await VerifyDiagnosticsAsync(new EvaluatedProjectState(fixedState, ReferenceAssemblies), fixedState.AdditionalProjects.Values.Select(additionalProject => new EvaluatedProjectState(additionalProject, ReferenceAssemblies)).ToImmutableArray(), fixedState.ExpectedDiagnostics.ToArray(), Verify.PushContext("Diagnostics of fixed state"), cancellationToken).ConfigureAwait(false);
                 if (allowFixAll && CodeActionExpected(BatchFixedState))
                 {
-                    await VerifyDiagnosticsAsync(batchFixedState.Sources.ToArray(), batchFixedState.AdditionalFiles.ToArray(), batchFixedState.AdditionalProjects.ToArray(), batchFixedState.AdditionalReferences.ToArray(), batchFixedState.ExpectedDiagnostics.ToArray(), Verify.PushContext("Diagnostics of batch fixed state"), cancellationToken).ConfigureAwait(false);
+                    await VerifyDiagnosticsAsync(new EvaluatedProjectState(batchFixedState, ReferenceAssemblies), batchFixedState.AdditionalProjects.Values.Select(additionalProject => new EvaluatedProjectState(additionalProject, ReferenceAssemblies)).ToImmutableArray(), batchFixedState.ExpectedDiagnostics.ToArray(), Verify.PushContext("Diagnostics of batch fixed state"), cancellationToken).ConfigureAwait(false);
                 }
 
                 await VerifyFixAsync(testState, fixedState, batchFixedState, Verify, cancellationToken).ConfigureAwait(false);
@@ -296,9 +308,23 @@ namespace Microsoft.CodeAnalysis.Testing
             {
                 numberOfFixAllInDocumentIterations = NumberOfFixAllInDocumentIterations.Value;
             }
+            else if (NumberOfFixAllIterations != null)
+            {
+                numberOfFixAllInDocumentIterations = NumberOfFixAllIterations.Value;
+            }
             else
             {
-                numberOfFixAllInDocumentIterations = numberOfFixAllIterations;
+                if (!HasAnyChange(testState, batchFixedState))
+                {
+                    numberOfFixAllInDocumentIterations = 0;
+                }
+                else
+                {
+                    // Expect at most one iteration per fixable document
+                    var fixers = GetCodeFixProviders().ToArray();
+                    var fixableDiagnostics = testState.ExpectedDiagnostics.Where(diagnostic => fixers.Any(fixer => fixer.FixableDiagnosticIds.Contains(diagnostic.Id)));
+                    numberOfFixAllInDocumentIterations = -fixableDiagnostics.GroupBy(diagnostic => diagnostic.Spans.FirstOrDefault().Span.Path).Count();
+                }
             }
 
             var t1 = VerifyFixAsync(Language, GetDiagnosticAnalyzers().ToImmutableArray(), GetCodeFixProviders().ToImmutableArray(), testState, fixedState, numberOfIncrementalIterations, FixEachAnalyzerDiagnosticAsync, verifier.PushContext("Iterative code fix application"), cancellationToken).ConfigureAwait(false);
@@ -368,15 +394,15 @@ namespace Microsoft.CodeAnalysis.Testing
             SolutionState oldState,
             SolutionState newState,
             int numberOfIterations,
-            Func<ImmutableArray<DiagnosticAnalyzer>, ImmutableArray<CodeFixProvider>, int?, string?, Project, int, IVerifier, CancellationToken, Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)>> getFixedProject,
+            Func<ImmutableArray<DiagnosticAnalyzer>, ImmutableArray<CodeFixProvider>, int?, string?, Action<CodeAction, IVerifier>?, Project, int, IVerifier, CancellationToken, Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)>> getFixedProject,
             IVerifier verifier,
             CancellationToken cancellationToken)
         {
-            var project = await CreateProjectAsync(oldState.Sources.ToArray(), oldState.AdditionalFiles.ToArray(), oldState.AdditionalProjects.ToArray(), oldState.AdditionalReferences.ToArray(), language, cancellationToken);
+            var project = await CreateProjectAsync(new EvaluatedProjectState(oldState, ReferenceAssemblies), oldState.AdditionalProjects.Values.Select(additionalProject => new EvaluatedProjectState(additionalProject, ReferenceAssemblies)).ToImmutableArray(), cancellationToken);
             var compilerDiagnostics = await GetCompilerDiagnosticsAsync(project, cancellationToken).ConfigureAwait(false);
 
             ExceptionDispatchInfo? iterationCountFailure;
-            (project, iterationCountFailure) = await getFixedProject(analyzers, codeFixProviders, CodeActionIndex, CodeActionEquivalenceKey, project, numberOfIterations, verifier, cancellationToken).ConfigureAwait(false);
+            (project, iterationCountFailure) = await getFixedProject(analyzers, codeFixProviders, CodeActionIndex, CodeActionEquivalenceKey, CodeActionVerifier, project, numberOfIterations, verifier, cancellationToken).ConfigureAwait(false);
 
             // After applying all of the code fixes, compare the resulting string to the inputted one
             var updatedDocuments = project.Documents.ToArray();
@@ -387,7 +413,7 @@ namespace Microsoft.CodeAnalysis.Testing
             {
                 var actual = await GetSourceTextFromDocumentAsync(updatedDocuments[i], cancellationToken).ConfigureAwait(false);
                 verifier.EqualOrDiff(newState.Sources[i].content.ToString(), actual.ToString(), $"content of '{newState.Sources[i].filename}' did not match. Diff shown with expected as baseline:");
-                verifier.Equal(newState.Sources[i].content.Encoding, actual.Encoding, $"encoding of '{newState.Sources[i].filename}' was expected to be '{newState.Sources[i].content.Encoding}' but was '{actual.Encoding}'");
+                verifier.Equal(newState.Sources[i].content.Encoding, actual.Encoding, $"encoding of '{newState.Sources[i].filename}' was expected to be '{newState.Sources[i].content.Encoding?.WebName}' but was '{actual.Encoding?.WebName}'");
                 verifier.Equal(newState.Sources[i].content.ChecksumAlgorithm, actual.ChecksumAlgorithm, $"checksum algorithm of '{newState.Sources[i].filename}' was expected to be '{newState.Sources[i].content.ChecksumAlgorithm}' but was '{actual.ChecksumAlgorithm}'");
                 verifier.Equal(newState.Sources[i].filename, updatedDocuments[i].Name, $"file name was expected to be '{newState.Sources[i].filename}' but was '{updatedDocuments[i].Name}'");
             }
@@ -400,16 +426,29 @@ namespace Microsoft.CodeAnalysis.Testing
             {
                 var actual = await updatedAdditionalDocuments[i].GetTextAsync(cancellationToken).ConfigureAwait(false);
                 verifier.EqualOrDiff(newState.AdditionalFiles[i].content.ToString(), actual.ToString(), $"content of '{newState.AdditionalFiles[i].filename}' did not match. Diff shown with expected as baseline:");
-                verifier.Equal(newState.AdditionalFiles[i].content.Encoding, actual.Encoding, $"encoding of '{newState.AdditionalFiles[i].filename}' was expected to be '{newState.AdditionalFiles[i].content.Encoding}' but was '{actual.Encoding}'");
+                verifier.Equal(newState.AdditionalFiles[i].content.Encoding, actual.Encoding, $"encoding of '{newState.AdditionalFiles[i].filename}' was expected to be '{newState.AdditionalFiles[i].content.Encoding?.WebName}' but was '{actual.Encoding?.WebName}'");
                 verifier.Equal(newState.AdditionalFiles[i].content.ChecksumAlgorithm, actual.ChecksumAlgorithm, $"checksum algorithm of '{newState.AdditionalFiles[i].filename}' was expected to be '{newState.AdditionalFiles[i].content.ChecksumAlgorithm}' but was '{actual.ChecksumAlgorithm}'");
                 verifier.Equal(newState.AdditionalFiles[i].filename, updatedAdditionalDocuments[i].Name, $"file name was expected to be '{newState.AdditionalFiles[i].filename}' but was '{updatedAdditionalDocuments[i].Name}'");
+            }
+
+            var updatedAnalyzerConfigDocuments = project.AnalyzerConfigDocuments().ToArray();
+
+            verifier.Equal(newState.AnalyzerConfigFiles.Count, updatedAnalyzerConfigDocuments.Length, $"expected '{nameof(newState)}.{nameof(SolutionState.AnalyzerConfigFiles)}' and '{nameof(updatedAnalyzerConfigDocuments)}' to be equal but '{nameof(newState)}.{nameof(SolutionState.AnalyzerConfigFiles)}' contains '{newState.AnalyzerConfigFiles.Count}' documents and '{nameof(updatedAnalyzerConfigDocuments)}' contains '{updatedAnalyzerConfigDocuments.Length}' documents");
+
+            for (var i = 0; i < updatedAnalyzerConfigDocuments.Length; i++)
+            {
+                var actual = await updatedAnalyzerConfigDocuments[i].GetTextAsync(cancellationToken).ConfigureAwait(false);
+                verifier.EqualOrDiff(newState.AnalyzerConfigFiles[i].content.ToString(), actual.ToString(), $"content of '{newState.AnalyzerConfigFiles[i].filename}' did not match. Diff shown with expected as baseline:");
+                verifier.Equal(newState.AnalyzerConfigFiles[i].content.Encoding, actual.Encoding, $"encoding of '{newState.AnalyzerConfigFiles[i].filename}' was expected to be '{newState.AnalyzerConfigFiles[i].content.Encoding?.WebName}' but was '{actual.Encoding?.WebName}'");
+                verifier.Equal(newState.AnalyzerConfigFiles[i].content.ChecksumAlgorithm, actual.ChecksumAlgorithm, $"checksum algorithm of '{newState.AnalyzerConfigFiles[i].filename}' was expected to be '{newState.AnalyzerConfigFiles[i].content.ChecksumAlgorithm}' but was '{actual.ChecksumAlgorithm}'");
+                verifier.Equal(newState.AnalyzerConfigFiles[i].filename, updatedAnalyzerConfigDocuments[i].Name, $"file name was expected to be '{newState.AnalyzerConfigFiles[i].filename}' but was '{updatedAnalyzerConfigDocuments[i].Name}'");
             }
 
             // Validate the iteration counts after validating the content
             iterationCountFailure?.Throw();
         }
 
-        private async Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixEachAnalyzerDiagnosticAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
+        private async Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixEachAnalyzerDiagnosticAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Action<CodeAction, IVerifier>? codeActionVerifier, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
         {
             var expectedNumberOfIterations = numberOfIterations;
             if (numberOfIterations < 0)
@@ -422,7 +461,7 @@ namespace Microsoft.CodeAnalysis.Testing
             bool done;
             do
             {
-                var analyzerDiagnostics = await GetSortedDiagnosticsAsync(project.Solution, analyzers, CompilerDiagnostics, cancellationToken).ConfigureAwait(false);
+                var analyzerDiagnostics = await GetSortedDiagnosticsAsync(project.Solution, analyzers, additionalDiagnostics: ImmutableArray<Diagnostic>.Empty, CompilerDiagnostics, verifier, cancellationToken).ConfigureAwait(false);
                 if (analyzerDiagnostics.Length == 0)
                 {
                     break;
@@ -444,8 +483,10 @@ namespace Microsoft.CodeAnalysis.Testing
 
                 previousDiagnostics = analyzerDiagnostics;
 
-                var fixableDiagnostics = analyzerDiagnostics.Where(
-                    diagnostic => codeFixProviders.Any(provider => provider.FixableDiagnosticIds.Contains(diagnostic.Id))).ToImmutableArray();
+                var fixableDiagnostics = analyzerDiagnostics
+                    .Where(diagnostic => codeFixProviders.Any(provider => provider.FixableDiagnosticIds.Contains(diagnostic.Id)))
+                    .Where(diagnostic => project.GetDocument(diagnostic.Location.SourceTree) is object)
+                    .ToImmutableArray();
 
                 if (CodeFixTestBehaviors.HasFlag(CodeFixTestBehaviors.FixOne))
                 {
@@ -472,7 +513,7 @@ namespace Microsoft.CodeAnalysis.Testing
                     }
 
                     var filteredActions = FilterCodeActions(actions.ToImmutable());
-                    var actionToApply = TryGetCodeActionToApply(filteredActions, codeFixIndex, codeFixEquivalenceKey, verifier);
+                    var actionToApply = TryGetCodeActionToApply(filteredActions, codeFixIndex, codeFixEquivalenceKey, codeActionVerifier, verifier);
                     if (actionToApply != null)
                     {
                         anyActions = true;
@@ -521,22 +562,22 @@ namespace Microsoft.CodeAnalysis.Testing
             return (project, null);
         }
 
-        private Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyzerDiagnosticsInDocumentAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
+        private Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyzerDiagnosticsInDocumentAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Action<CodeAction, IVerifier>? codeActionVerifier, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
         {
-            return FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope.Document, analyzers, codeFixProviders, codeFixIndex, codeFixEquivalenceKey, project, numberOfIterations, verifier, cancellationToken);
+            return FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope.Document, analyzers, codeFixProviders, codeFixIndex, codeFixEquivalenceKey, codeActionVerifier, project, numberOfIterations, verifier, cancellationToken);
         }
 
-        private Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyzerDiagnosticsInProjectAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
+        private Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyzerDiagnosticsInProjectAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Action<CodeAction, IVerifier>? codeActionVerifier, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
         {
-            return FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope.Project, analyzers, codeFixProviders, codeFixIndex, codeFixEquivalenceKey, project, numberOfIterations, verifier, cancellationToken);
+            return FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope.Project, analyzers, codeFixProviders, codeFixIndex, codeFixEquivalenceKey, codeActionVerifier, project, numberOfIterations, verifier, cancellationToken);
         }
 
-        private Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyzerDiagnosticsInSolutionAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
+        private Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyzerDiagnosticsInSolutionAsync(ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Action<CodeAction, IVerifier>? codeActionVerifier, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
         {
-            return FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope.Solution, analyzers, codeFixProviders, codeFixIndex, codeFixEquivalenceKey, project, numberOfIterations, verifier, cancellationToken);
+            return FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope.Solution, analyzers, codeFixProviders, codeFixIndex, codeFixEquivalenceKey, codeActionVerifier, project, numberOfIterations, verifier, cancellationToken);
         }
 
-        private async Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope scope, ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
+        private async Task<(Project project, ExceptionDispatchInfo? iterationCountFailure)> FixAllAnalyerDiagnosticsInScopeAsync(FixAllScope scope, ImmutableArray<DiagnosticAnalyzer> analyzers, ImmutableArray<CodeFixProvider> codeFixProviders, int? codeFixIndex, string? codeFixEquivalenceKey, Action<CodeAction, IVerifier>? codeActionVerifier, Project project, int numberOfIterations, IVerifier verifier, CancellationToken cancellationToken)
         {
             var expectedNumberOfIterations = numberOfIterations;
             if (numberOfIterations < 0)
@@ -549,7 +590,7 @@ namespace Microsoft.CodeAnalysis.Testing
             bool done;
             do
             {
-                var analyzerDiagnostics = await GetSortedDiagnosticsAsync(project.Solution, analyzers, CompilerDiagnostics, cancellationToken).ConfigureAwait(false);
+                var analyzerDiagnostics = await GetSortedDiagnosticsAsync(project.Solution, analyzers, additionalDiagnostics: ImmutableArray<Diagnostic>.Empty, CompilerDiagnostics, verifier, cancellationToken).ConfigureAwait(false);
                 if (analyzerDiagnostics.Length == 0)
                 {
                     break;
@@ -578,19 +619,20 @@ namespace Microsoft.CodeAnalysis.Testing
 
                     foreach (var codeFixProvider in codeFixProviders)
                     {
-                        if (!codeFixProvider.FixableDiagnosticIds.Contains(diagnostic.Id))
+                        if (!codeFixProvider.FixableDiagnosticIds.Contains(diagnostic.Id)
+                            || !(project.GetDocument(diagnostic.Location.SourceTree) is { } document))
                         {
                             // do not pass unsupported diagnostics to a code fix provider
                             continue;
                         }
 
                         var actionsBuilder = ImmutableArray.CreateBuilder<CodeAction>();
-                        var context = new CodeFixContext(project.GetDocument(diagnostic.Location.SourceTree), diagnostic, (a, d) => actionsBuilder.Add(a), cancellationToken);
+                        var context = new CodeFixContext(document, diagnostic, (a, d) => actionsBuilder.Add(a), cancellationToken);
                         await codeFixProvider.RegisterCodeFixesAsync(context).ConfigureAwait(false);
                         actions.AddRange(FilterCodeActions(actionsBuilder.ToImmutable()).Select(action => (action, codeFixProvider)));
                     }
 
-                    var actionToApply = TryGetCodeActionToApply(actions.Select(a => a.Item1).ToImmutableArray(), codeFixIndex, codeFixEquivalenceKey, verifier);
+                    var actionToApply = TryGetCodeActionToApply(actions.Select(a => a.Item1).ToImmutableArray(), codeFixIndex, codeFixEquivalenceKey, codeActionVerifier, verifier);
                     if (actionToApply != null)
                     {
                         firstDiagnostic = diagnostic;
